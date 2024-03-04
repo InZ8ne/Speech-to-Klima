@@ -1,0 +1,16 @@
+{
+"command": 0,
+"feature": "sonne",
+"data": [
+{
+"value": 50,
+"Time": 600
+},
+{
+"value": 50
+},
+{
+"place": null
+}
+]
+}
