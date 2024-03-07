@@ -1,41 +1,71 @@
 import whisper
 import torch
 import ffmpeg
-
-#Load model and audio
-model = whisper.load_model('tiny')
-audio = whisper.load_audio('data/niko_planung.mp3')
-audio = whisper.pad_or_trim(audio)
-
-mel = whisper.log_mel_spectrogram(audio).to(model.device)
-
-#Detect the language
-_, probs = model.detect_language(mel)
-print(f"Detected Language: {max(probs, key=probs.get)}")
-
-# decode the audio
-options = whisper.DecodingOptions()
-result = whisper.decode(model, mel, options)
-
-# print the recognized text
-print(result.text)
-
 import re
-detected_text = result.text.lower()
+import json
+from faster_whisper import WhisperModel
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, File, UploadFile, Form
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+
+origins = [
+    "http://localhost.tiangolo.com",
+    "https://localhost.tiangolo.com",
+    "http://localhost",
+    "http://localhost:8080",
+]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.post("/transcribe", tags=["STT"])
+async def create_upload_file(file: Form()): # type: ignore
+    transcribe_audio(file) #this function is defined in the Website Backend
+    return {"filename": file.filename}
+
+
+@app.get("/STT/get", tags=["STT"])
+def get_STT_cmd():
+    data = '{"Command": 2,"Feature": "Sonne","data": [{"value": 50,"Time": 234875842758},{"value": 99},{"Place": "Wien"}]}'
+    return {data}
+
+def executeWhisper(audioFile):
+  #Load model and audio
+  model = WhisperModel("tiny", device="cpu", compute_type="int8")
+  segments, info = model.transcribe(audioFile, beam_size=5)
+
+  for segment in segments:
+      print("[%.2fs -> %.2fs] %s" %
+            (segment.start, segment.end, segment.text))
+      result = segment.text
+
+  # print the recognized text
+  print(result.text)
+  detected_text = result.text.lower()
+  return detected_text
 
 def GetRegexTime(text):
-   hour_pattern = re.compile(r'(\w+)\s*stunde(n)?')
-   minute_pattern = re.compile(r'(\w+)\s*minute(n)?')
-   second_pattern = re.compile(r'(\w+)\s*sekunde(n)?')
-   hour_match = hour_pattern.search(text)
-   minute_match = minute_pattern.search(text)
-   second_match = second_pattern.search(text)
-   # Die Zahl aus dem Regex herausziehen Gruppe 1 = (|d+) Gruppe 2 = n
-   hours = hour_match.group(1) if hour_match else 0
-   minutes = minute_match.group(1) if minute_match else 0
-   seconds = second_match.group(1) if second_match else 0
+  hour_pattern = re.compile(r'(\w+)\s*stunde(n)?')
+  minute_pattern = re.compile(r'(\w+)\s*minute(n)?')
+  second_pattern = re.compile(r'(\w+)\s*sekunde(n)?')
+  hour_match = hour_pattern.search(text)
+  minute_match = minute_pattern.search(text)
+  second_match = second_pattern.search(text)
+  # Die Zahl aus dem Regex herausziehen Gruppe 1 = (|d+) Gruppe 2 = n
+  hours = hour_match.group(1) if hour_match else 0
+  minutes = minute_match.group(1) if minute_match else 0
+  seconds = second_match.group(1) if second_match else 0
 
-   return hours, minutes, seconds
+  return hours, minutes, seconds
 
 def GetRegexIntensity(text):
   intensity_pattern = re.compile(r'(\d+)\s*(prozent?|%)')
@@ -49,12 +79,7 @@ def GetRegexPlace(text):
   place = place_match.group(2) if place_match else ""
   return place
 
-keywords = ["sonne", "regen", "temperatur", "luftfeuchtigkeit"]
-detected_numbers = re.findall(r'\d+', detected_text)
-numbers = [int(num) for num in detected_numbers]
-print(f"numbers: {numbers}")
-
-def GetCommandType(text):
+def GetCommandType(text, keywords):
   ContainKeyword = False
   if "in" in text:
     for keyword in keywords:
@@ -65,7 +90,7 @@ def GetCommandType(text):
     commandType = 1
   return commandType
 
-def GetFeature(text):
+def GetFeature(text, keywords):
   features = []
   for keyword in keywords:
     if keyword in text:
@@ -121,48 +146,59 @@ def TimeToNumerical3(time):
       time = 20
 
     return time
-  
-CommandType = GetCommandType(detected_text)
-print(f"Command Type: {CommandType}")
 
-Features = GetFeature(detected_text)
-print(f"Feature: {Features}")
+def getSpeechToKlima(speechFile):
 
-Intensity = GetRegexIntensity(detected_text)
-print(f"Intensity: {Intensity}")
+  detected_text = executeWhisper(speechFile)
+  keywords = ["sonne", "regen", "temperatur", "luftfeuchtigkeit"]
+  detected_numbers = re.findall(r'\d+', detected_text) #optional (for testing)
+  numbers = [int(num) for num in detected_numbers] #optional (for tsting)
+  print(f"numbers: {numbers}")
+  #Type of the Command (Planning, Instant, Live)
+  CommandType = GetCommandType(detected_text)
+  print(f"Command Type: {CommandType}")
+  #Feature (Sun, rain, temperature, humidity)
+  Features = GetFeature(detected_text)
+  print(f"Feature: {Features}")
 
-hours, minutes, seconds = GetRegexTime(detected_text)
-hours = TimeToNumerical3(hours)
-minutes = TimeToNumerical3(minutes)
-seconds = TimeToNumerical3(seconds)
-print(f"hours: {hours}")
-print(f"minutes: {minutes}")
-print(f"seconds: {seconds}")
-relative_unixTime = (hours*60+minutes)*60+seconds
-print(f"unix time: {relative_unixTime}")
+  #Intensity of the Feature
+  Intensity = GetRegexIntensity(detected_text)
+  print(f"Intensity: {Intensity}")
 
-Place = None
-if CommandType == 2:
-  Place = GetRegexPlace(detected_text)
-print(f"Place: {Place}")
+  #When to plan
+  hours, minutes, seconds = GetRegexTime(detected_text)
+  hours = TimeToNumerical3(hours)
+  minutes = TimeToNumerical3(minutes)
+  seconds = TimeToNumerical3(seconds)
+  print(f"hours: {hours}")
+  print(f"minutes: {minutes}")
+  print(f"seconds: {seconds}")
+  relative_unixTime = (hours*60+minutes)*60+seconds
+  print(f"unix time: {relative_unixTime}")
 
-import json
-dictionary = {
-    "command": CommandType,
-    "feature": Features[0],
-    "data":[
-        {
-          "value": Intensity,
-          "Time": relative_unixTime
-        },
-        {
-          "value": Intensity
-        },
-        {
-          "place": Place
-        }
-    ]
-}
-json_object = json.dumps(dictionary, indent=0)
-with open("outputs/sample.json", "w") as outfile:
-    outfile.write(json_object)
+  #What place if Live
+  Place = None
+  if CommandType == 2:
+    Place = GetRegexPlace(detected_text)
+  print(f"Place: {Place}")
+
+  #Write all data into a dictionary
+  dictionary = {
+      "command": CommandType,
+      "feature": Features[0],
+      "data":[
+          {
+            "value": Intensity,
+            "Time": relative_unixTime
+          },
+          {
+            "value": Intensity
+          },
+          {
+            "place": Place
+          }
+      ]
+  }
+  #Write the dictionary in a json file
+  json_object = json.dumps(dictionary, indent=0)
+  return json_object
